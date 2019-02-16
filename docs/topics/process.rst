@@ -2,24 +2,8 @@
 Process and system
 ==================
 
-This section is about process applications. A process application is
-a projection into an event sourced application. A system of process
-applications can be constructed by linking applications together in
-a pipeline.
-
-Reliability is the most important concern in this section. A process
-is considered to be reliable if its product is entirely unaffected
-(except in being delayed) by a sudden termination of the process
-happening at any time. The only trick is remembering that, in general,
-production is determined by consumption with recording. In particular,
-if the consumption and the recording are reliable, then the product of
-the process is bound to be reliable.
-
-This definition of the reliability of a process doesn't include availability.
-Infrastructure unreliability may cause processing delays. Disorderly
-environments shouldn't cause disorderly processing. The other important
-concerns discussed in this section are scalability and maintainability.
-
+This section discusses how to make a reliable distributed system
+that is scalable and maintainable.
 
 .. (If we can reject the pervasive description of `distributed systems
 .. <https://en.wikipedia.org/wiki/Distributed_computing>`__ as a system of
@@ -40,26 +24,90 @@ concerns discussed in this section are scalability and maintainability.
 .. contents:: :local:
 
 
-Please note, the code presented in the example below works only with the library's
-SQLAlchemy record manager. Django support is planned, but not yet implemented. Support
-for Cassandra is being considered but applications will probably be simple replications
-of application state, due to the limited atomicity of Cassandra's lightweight transactions.
-Cassandra could be used to archive events written firstly into a relational database.
-Events could be removed from the relational database before storage limits are encountered.
-Events missing in the relational database could be sourced from Cassandra.
+.. Please note, the code presented in the example below works only with the library's
+.. SQLAlchemy record manager. Django support is planned, but not yet implemented. Support
+.. for Cassandra is being considered but applications will probably be simple replications
+.. of application state, due to the limited atomicity of Cassandra's lightweight transactions.
+.. Cassandra could be used to archive events written firstly into a relational database.
+.. Events could be removed from the relational database before storage limits are encountered.
+.. Events missing in the relational database could be sourced from Cassandra.
 
 
 Overview
 ========
 
+A design for distributed systems is introduced that uses event-sourced
+applications as building blocks. The earlier design of the
+:doc:`event-sourced application </topics/application>` is extended in
+the design of the "process application". Process application classes
+can be composed into a pipeline expression, and a system can be defined as a
+set of pipeline expressions. This definition of a system can be entirely
+independent of infrastructure. Such a system can be run in different ways
+with identical results.
+
+Rather than seeking reliability in mathematics (e.g.
+`CSP <https://en.wikipedia.org/wiki/Communicating_sequential_processes>`__)
+or in physics (e.g. `Actor model <https://en.wikipedia.org/wiki/Actor_model>`__),
+the approach taken here is to seek reliable foundations in engineering empiricism,
+specifically in the empirical reliability of `counting <https://en.wikipedia.org/wiki/Counting>`__
+and of `ACID database transactions <https://en.wikipedia.org/wiki/ACID_(computer_science)>`__.
+
+Just as event sourcing "atomised" application state as a set of domain
+events, similarly the processing of domain events can be atomised as a
+potentially distributed set of local "process events" in which new domain
+events may occur. The subjective aim of a process event is "catching up
+on what happened".
+
+The processing of domain events is designed to be atomic and successive
+so that processing can progress in a determinate manner according to
+infrastructure availability. A provisional description of a design
+pattern for process events is included at the end of this section.
+
+
 Process application
 -------------------
 
-The library's process application class ``Process`` functions as a projection into
-an event-sourced application. Applications and projections are discussed in previous
-sections. The ``Process`` class extends ``SimpleApplication`` by also reading notification
-logs and writing tracking records. A process application also has a policy that defines how
-it will respond to domain events it reads from notification logs.
+A process application is an event-sourced :doc:`projection </topics/projections>`
+into an event-sourced :doc:`application </topics/application>`. One
+process application may "follow" another. A process application
+projects the state of the applications it follows into its own state.
+Being an event sourced application, the state of a process application
+can be obtained using a :doc:`notification log reader  </topics/notifications>`
+to obtain the state as a sequence of domain events. The projection itself
+is defined by the application's policy, which defines responses to domain
+events in terms of domain model operations, causing new domain events to
+be generated.
+
+The library class
+:class:`~eventsourcing.application.process.ProcessApplication`
+functions as a projection into an event-sourced application.
+It extends :class:`~eventsourcing.application.simple.SimpleApplication`
+by having a notification log reader for each application it follows.
+
+The process application class has an application policy which defines
+how to respond to the domain events it reads from the notification logs
+of the applications it follows. The process application class implements
+the process event pattern: individual "process event" data is
+stored atomically.
+
+
+Reliability
+~~~~~~~~~~~
+
+Reliability is the most important concern in this section. A process
+is considered to be reliable if its result is entirely unaffected
+(except in being delayed) by infrastructure failure such as network
+partitions or sudden termination of operating system processes.
+Infrastructure unreliability may cause processing delays, but disorderly
+environments shouldn't (at least by default) cause disorderly processing
+results.
+
+The only trick was remembering that production is determined in general
+by consumption with recording. In particular, if consumption and
+recording are reliable, then production is bound to be reliable.
+As shown below, the reliability of this library's approach to event
+processing depends only on counting and the atomicity of database
+transactions, both of which are normally considered reliable.
 
 
 Notification tracking
@@ -69,7 +117,7 @@ A process application consumes events by reading domain event notifications
 from its notification log readers. The events are retrieved in a reliable order,
 without race conditions or duplicates or missing items. Each notification in a
 notification log has a unique integer ID, and the notification log IDs form a
-contiguous sequence.
+contiguous sequence (counting).
 
 To keep track of its position in the notification log, a process application
 will create a new tracking record for each event notification it processes.
@@ -105,13 +153,22 @@ records).
 
 If some of the new records can't be written, then none are. If anything goes wrong
 before all the records have been written, the transaction will abort, and none of
-the records will be written. On the other hand, if a tracking record is written,
-then so are any new event records, and the process will have fully completed an atomic
+the records will be written. On the other hand, if a tracking record was written,
+then so were any new event records, and so the process will have completed an atomic
 progression.
 
 The atomicity of the recording and consumption determines the production as atomic:
 a continuous stream of events is processed in discrete, sequenced, indivisible units.
 Hence, interruptions can only cause delays.
+
+Whilst the heart of this design is having the event processing proceed atomically
+so that any completed "process events" are exactly what they should be, of course
+the "CID" parts of ACID database transactions are also crucial. Especially, it is
+assumed that any records that have been committed will be available after any
+so-called "infrastructure failure". The continuing existence of data that has been
+successfully committed to a database is beyond the scope of this discussion about
+reliability. However, the "single point of failure" this may represent is acknowledged.
+
 
 .. It is assumed that whatever records have been
 .. committed by a process will not somehow be damaged by a sudden termination of the
@@ -121,58 +178,114 @@ Hence, interruptions can only cause delays.
 System of processes
 -------------------
 
-The library class ``System`` can be used to define a system of process applications,
-independently of scale.
-
+The library class :class:`~eventsourcing.application.system.System`
+can be used to define a system of process applications,
+entirely independently of infrastructure.
 In a system, one process application can follow another. One process can
 follow two other processes in a slightly more complicated system. A system
-could be just one process following itself.
+could be just one process application following itself.
+
+The reliability of the domain event processing allows a reliable "saga" or
+a "process manager" to be written without restricting or cluttering the application
+logic with precaution and remediation for infrastructure failures.
 
 
-Scale-independence
-~~~~~~~~~~~~~~~~~~
+Infrastructure-independence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The system can run at different scales, but the definition of the system is
-independent of scale.
+A system of process applications can be defined independently of infrastructure so that the
+same system can be run with different infrastructure at different times.
+For example, a system of process applications could be developed for use with
+SQLAlchemy, and later reused in a Django project.
 
-A system of process applications can run in a single thread, with synchronous propagation
-and processing of events. This is intended as a development mode.
 
-A system can also run with multiple operating system processes, with asynchronous
-propagation and processing of events. Having an asynchronous pipeline means events at
-different stages can be processed at the same time. This could be described as "diachronic"
-parallelism, like the way a pipelined CPU core has stages. This kind of parallelism can
-improve throughput, up to a limit provided by the number of steps required by the domain.
-The reliability of the sequantial processing allows one to write a reliable "saga" or a
-"process manager". In other words, a complicated sequence involving different aggregates,
-and perhaps different bounded contexts, can be implemented reliably without long-lived
-transactions.
+System runners
+~~~~~~~~~~~~~~
 
-To scale the system further, a system of process applications can run with parallel instances
-of the pipeline expressions, just like the way an operating system can use many cores (pipelines)
-processing instruction in parallel. Having parallel pipelines means that many events can be
-processed at the same stage at the same time. This "synchronic" parallelism allows a system
-to take advantage of the scale of its infrastructure.
+A system of process applications can run in a single thread,
+with synchronous propagation and processing of events.
+A system can also be run with multiple threads or multiple
+operating system processes, with application state propagated
+asynchronously in different ways.
+
+An asynchronous pipeline means one event can be processed by
+each process application at the same time. This is very much
+like
+`instruction pipelining <https://en.wikipedia.org/wiki/Instruction_pipelining>`__
+in a CPU core.
+
+
+Maintainability
+~~~~~~~~~~~~~~~
+
+Whilst maintainability is greatly assisted by having an entire
+system of applications defined independently of infrastructure, it
+greatly helps also to be able to run such a system with a single
+thread. So long as the behaviours are preserved, running the system
+without any concurrent threads or processes makes it much easier to
+develop and maintain the system.
+
+
+Scalability
+~~~~~~~~~~~
+
+Especially when using multiple operating system processes, throughput
+can be increased by breaking longer steps into smaller steps, up but
+only to a limit provided by the number of steps actually required by
+the domain. Such "diachronic" parallelism therefore provides limited
+opportunities for scaling throughput.
+
+A system of process applications can also be run with many parallel
+instances of its pipeline. This is very much like the way a multi-core
+CPU has many cores (a core is a pipeline). This "synchronic" parallelism
+means that many events can effectively be processed with the same process
+application at the same time. This kind of parallelism allows the system
+to be scaled, but only to a limit provided by the degree of parallelism
+inherent in the domain (greatest when there are no causal dependencies
+between domain events, least when there are maximal causal dependencies
+between domain events).
 
 
 Causal dependencies
 ~~~~~~~~~~~~~~~~~~~
 
-If an aggregate is created and then updated, the second event is causally dependent on
-the first. Causal dependencies between events can be detected and used to synchronise
-the processing of parallel pipelines downstream. Downstream processing of one pipeline
-can wait for an event to be processed in another.
+Causal dependencies are needed to synchronise between parallel processing of a
+sequence of events. This is used in the library when a system is run with multiple
+pipelines.
+
+Causal dependencies between events can be automatically detected and used to synchronise
+the processing of parallel pipelines downstream. For example, if an aggregate is created
+and then updated, the second event is obviously causally dependent on the first (you can't
+update something that doesn't exist). Downstream processing in one pipeline can wait (stall)
+for a dependency to be processed in another pipeline. This is like a pipeline interlock in
+a multi-core CPU.
 
 In the process applications, the causal dependencies are automatically inferred by detecting
-the originator ID and version of aggregates as they are retrieved. The old notifications are
-referenced in the first new notification. Downstream can then check all causal dependencies have
-been processed, using its tracking records.
+the originator ID and version of aggregates as they are retrieved from the repository. The
+old notifications are referenced in the first new notification. Downstream can then check
+all causal dependencies have been processed, using its tracking records.
 
 In case there are many dependencies in the same pipeline, only the newest dependency in each
 pipeline is included. By default in the library, only dependencies in different pipelines are
 included. If causal dependencies from all pipelines were included in each notification, each
 pipeline could be processed in parallel, to an extent limited by the dependencies between the
 notifications.
+
+
+.. If persistence were optional, this design could be used for high-performance applications
+.. which would be understood to be less durable. Data could be streamed out asynchronously
+.. and still stored atomically but after the processing notifications are available.
+.. Resuming could then go back several steps, and perhaps a signal could be sent so
+.. downstream restarts from an earlier step. Or maybe the new repeat processing could
+.. be ignored by downstream, having already processed those items.
+
+
+.. Refactoring
+.. ~~~~~~~~~~~
+
+.. Todo: Something about moving from a single process application to two. Migrate
+.. aggregates by replicating those events from the notification log, and just carry
+.. on.
 
 
 Kahn process networks
@@ -202,24 +315,9 @@ A process application, specifically an aggregate combined with a policy in a pro
 could function effectively as a "saga", or "process manager", or "workflow manager". That is, it
 could effectively control a sequence of steps involving other aggregates in other bounded contexts,
 steps that might otherwise be controlled with a "long-lived transaction". It could 'maintain
-the state of the sequence and determine the next processing step based on intermediate results'
-(quote from Enterprise Integration Patterns). Exceptional "unhappy path" behaviour can be
-implemented as part of the logic of the application.
-
-.. If persistence were optional, this design could be used for high-performance applications
-.. which would be understood to be less durable. Data could be streamed out asynchronously
-.. and still stored atomically but after the processing notifications are available.
-.. Resuming could then go back several steps, and perhaps a signal could be sent so
-.. downstream restarts from an earlier step. Or maybe the new repeat processing could
-.. be ignored by downstream, having already processed those items.
-
-
-.. Refactoring
-.. ~~~~~~~~~~~
-
-.. Todo: Something about moving from a single process application to two. Migrate
-.. aggregates by replicating those events from the notification log, and just carry
-.. on.
+the state of the sequence and determine the next processing step based on intermediate results',
+to quote a phrase from Enterprise Integration Patterns. Exceptional "unhappy path" behaviour can
+be implemented as part of the logic of the application.
 
 
 Example
@@ -322,7 +420,7 @@ Similarly, a payment can be created. A payment also has an ``order_id``.
 .. Factory
 .. -------
 ..
-.. The orders factory ``create_new_order()`` is decorated with the ``@retry`` decorator,
+.. The orders factory ``create_order()`` is decorated with the ``@retry`` decorator,
 .. to be resilient against both concurrency conflicts and any operational errors.
 ..
 .. .. code:: python
@@ -331,7 +429,7 @@ Similarly, a payment can be created. A payment also has an ``order_id``.
 ..     from eventsourcing.exceptions import OperationalError, RecordConflictError
 ..
 ..     @retry((OperationalError, RecordConflictError), max_attempts=10, wait=0.01)
-..     def create_new_order():
+..     def create_order():
 ..         order = Order.__create__()
 ..         order.__save__()
 ..         return order.id
@@ -339,7 +437,7 @@ Similarly, a payment can be created. A payment also has an ``order_id``.
 .. Todo: Raise and catch ConcurrencyError instead of RecordConflictError (convert somewhere
 .. or just raise ConcurrencyError when there is a record conflict?).
 
-As shown in previous sections, the behaviours of this domain model can be fully tested
+The behaviours of this domain model can be fully tested
 with simple test cases, without involving any other components.
 
 
@@ -347,16 +445,37 @@ Commands
 --------
 
 Commands have been discussed so far as methods on aggregate objects. Here, system
-commands are introduced, as event sourced aggregates. System command aggregates can
-be created, and set as "done". A commands process application can be followed by other
-applications. This provides a standard interface for system input.
+commands are introduced, as event sourced aggregates created within a separate
+commands application.
 
-In the code below, the system command class ``CreateNewOrder`` is defined using the
-library ``Command`` class. The ``Command`` class extends the ``AggregateRoot`` class
-with a method ``done()`` and a property ``is_done``.
+One advantage of using a separate commands application is that commands can be
+introduced into an event processing system without risk of interrupting the flow
+of event processing by the process applications (due to potential contention
+writing to the application's notification log). The command applications need not
+follow any other application, and so there is no event processing to interrupt.
+Hence, normal application command methods can be used on command applications
+to create commands, and another process application will follow the commands
+application and thereby process the commands.
 
-The ``CreateNewOrder`` class extends the library's ``Command`` class with an event
-sourced ``order_id`` attribute, which will be used to associate the command's objects
+Another advantage of having distinct commands is that old commands can be
+used to check the same application state is generated by a new version
+of the system.
+
+
+.. System command aggregates can
+.. be created, and set as "done". A commands process application can be followed by other
+.. applications. This provides a standard interface for system input.
+
+In the example below, the command class ``CreateOrder`` is defined using the
+library's command class, :class:`~eventsourcing.domain.model.command.Command`, which
+introduces the name ``Command`` for use in domain models, and which
+extends the library's :class:`~eventsourcing.domain.model.aggregate.AggregateRoot`
+class with a method ``done()`` and a property ``is_done``.
+
+The ``CreateOrder`` class extends the library's
+:class:`~eventsourcing.domain.model.command.Command`
+class with an event sourced ``order_id`` attribute, which
+will be used to associate the command's objects
 with the orders created by the system in response.
 
 .. code:: python
@@ -365,13 +484,17 @@ with the orders created by the system in response.
     from eventsourcing.domain.model.decorators import attribute
 
 
-    class CreateNewOrder(Command):
+    class CreateOrder(Command):
+
+        class Created(Command.Created):
+            pass
+
         @attribute
         def order_id(self):
             pass
 
 
-A ``CreateNewOrder`` command can be assigned an order ID. Its ``order_id`` is initially ``None``.
+A ``CreateOrder`` command can be assigned an order ID. Its ``order_id`` is initially ``None``.
 
 The behaviour of a system command aggregate can be fully tested with simple test cases,
 without involving any other components.
@@ -380,9 +503,9 @@ without involving any other components.
 
     from uuid import uuid4
 
-    def test_create_new_order_command():
-        # Create a "create new order" command.
-        cmd = CreateNewOrder.__create__()
+    def test_create_order_command():
+        # Create a "create order" command.
+        cmd = CreateOrder.__create__()
 
         # Check the initial values.
         assert cmd.order_id is None
@@ -400,16 +523,13 @@ without involving any other components.
         # Check the events.
         events = cmd.__batch_pending_events__()
         assert len(events) == 3
-        assert isinstance(events[0], CreateNewOrder.Created)
-        assert isinstance(events[1], CreateNewOrder.AttributeChanged)
-        assert isinstance(events[2], CreateNewOrder.Done)
+        assert isinstance(events[0], CreateOrder.Created)
+        assert isinstance(events[1], CreateOrder.AttributeChanged)
+        assert isinstance(events[2], CreateOrder.Done)
 
 
     # Run the test.
-    test_create_new_order_command()
-
-One advantage of having distinct commands is that a new version of the system can be
-verified by checking the same commands generates the same state as the old version.
+    test_create_order_command()
 
 
 Processes
@@ -433,10 +553,8 @@ by setting an ``Order`` as paid.
 
         @staticmethod
         def policy(repository, event):
-            if isinstance(event, Command.Created):
-                command_class = resolve_topic(event.originator_topic)
-                if command_class is CreateNewOrder:
-                    return Order.__create__(command_id=event.originator_id)
+            if isinstance(event, CreateOrder.Created):
+                return Order.__create__(command_id=event.originator_id)
 
             elif isinstance(event, Reservation.Created):
                 # Set the order as reserved.
@@ -473,9 +591,14 @@ by creating a new ``Payment``.
             if isinstance(event, Order.Reserved):
                 return Payment.__create__(order_id=event.originator_id)
 
-Additionally, the library class ``CommandProcess`` is extended by defining a policy that
-responds to ``Order.Created`` events by setting the ``order_id`` on the command. It also
+
+Additionally, the library class
+:class:`~eventsourcing.application.command.CommandProcess`
+is extended by defining a policy that responds to ``Order.Created``
+events by setting the ``order_id`` on the command. It also
 responds to ``Order.Paid`` events by setting the command as done.
+An alternative approach to updating the command may involve creating
+separate "command response" aggregates.
 
 .. code:: python
 
@@ -496,12 +619,13 @@ responds to ``Order.Paid`` events by setting the command as done.
 
         @staticmethod
         @retry((OperationalError, RecordConflictError), max_attempts=10, wait=0.01)
-        def create_new_order():
-            cmd = CreateNewOrder.__create__()
+        def create_order():
+            cmd = CreateOrder.__create__()
             cmd.__save__()
             return cmd.id
 
-The ``@retry`` decorator here protects against any contention writing to the ``Commands`` notification log.
+The ``@retry`` decorator here tries to overcome contention writing to the
+``Commands`` notification log.
 
 Please note, the ``__save__()`` method of aggregates shouldn't be called in a process policy,
 because pending events from both new and changed aggregates will be automatically collected by
@@ -539,7 +663,7 @@ rather than coding `test doubles <https://martinfowler.com/bliki/TestDouble.html
         assert not order.is_reserved
 
         # Process reservation created.
-        with Orders.mixin(SQLAlchemyApplication)() as orders:
+        with Orders.bind(SQLAlchemyApplication) as orders:
             event = Reservation.Created(originator_id=uuid4(), originator_topic='', order_id=order.id)
             orders.policy(repository=repository, event=event)
 
@@ -550,7 +674,13 @@ rather than coding `test doubles <https://martinfowler.com/bliki/TestDouble.html
     # Run the test.
     test_orders_policy()
 
-In the payments policy test below, a new payment is created because an order was reserved.
+The class method ``bind()`` simply calls ``mixin()`` to obtain a new object class
+which has ``Orders`` and ``SQLAlchemyApplication`` as bases, which is immediately
+constructed into a process application object. Using a process application
+object as a context manager ensures it is finally closed.
+
+In the payments policy test below, a new payment is created because an order
+was reserved.
 
 .. code:: python
 
@@ -561,7 +691,7 @@ In the payments policy test below, a new payment is created because an order was
         repository = {order.id: order}
 
         # Check payment is created whenever order is reserved.
-        with Payments.mixin(SQLAlchemyApplication)() as payments:
+        with Payments.bind(SQLAlchemyApplication) as payments:
             event = Order.Reserved(originator_id=order.id, originator_version=1)
             payment = payments.policy(repository=repository, event=event)
 
@@ -626,26 +756,56 @@ The orders-reservations-payments system can be defined using these pipeline expr
 
     from eventsourcing.application.system import System
 
-    system = System(
-        commands_pipeline,
-        reservations_pipeline,
-        payments_pipeline,
-        infrastructure_class=SQLAlchemyApplication
-    )
+    system = System(commands_pipeline, reservations_pipeline, payments_pipeline)
 
 This is equivalent to a system defined with the following single pipeline expression.
 
 .. code:: python
 
-    system = System(
-        Commands | Orders | Reservations | Orders | Payments | Orders | Commands,
-        infrastructure_class=SQLAlchemyApplication
-    )
+    pipeline = Commands | Orders | Reservations | Orders | Payments | Orders | Commands
+
+    system = System(pipeline)
 
 Although a process application class can appear many times in the pipeline
 expressions, there will only be one instance of each process when the pipeline
 system is instantiated. Each application can follow one or many applications,
 and can be followed by one or many applications.
+
+The system above is defined entirely without infrastructure, and can be
+run by providing an ``infrastructure_class`` when constructing a
+runner. For example, the ``system`` can be run using the library's
+:class:`~eventsourcing.application.system.SingleThreadedRunner`
+with ``infrastructure_class`` as
+:class:`~eventsourcing.application.sqlalchemy.SQLAlchemyApplication`,
+which means SQLAlchemy will be used to store data.
+
+If a system runner is used as a context manager, then it will be started
+automatically and finally closed.
+
+.. code:: python
+
+    from eventsourcing.application.system import SingleThreadedRunner
+
+    with SingleThreadedRunner(system, infrastructure_class=SQLAlchemyApplication):
+
+        # Do stuff here...
+        pass
+
+
+For convenience, let's redefine ``system`` to use the infrastructure class
+by default. It's still possible to pass an application infrastructure class
+to system runners, and override this default, but setting a default infrastructure
+class on the system object helps to keep these examples simple. For the same
+reason ``setup_tables`` is set ``True``, which means database tables will be
+created automatically in the examples below.
+
+.. code:: python
+
+    system = System(pipeline,
+        infrastructure_class=SQLAlchemyApplication,
+        setup_tables=True
+    )
+
 
 State is propagated between process applications through notification logs only. This can
 perhaps be recognised as the "bounded context" pattern. Each application can access only
@@ -656,6 +816,7 @@ application, processing could produce different results at different times, and 
 the processing wouldn't be reliable. If necessary, a process application could replicate the
 state of an aggregate within its own context in an application it is following, by projecting
 its events as they are read from an upstream notification log.
+
 
 .. Except for the definition and implementation of process,
 .. there are no special concepts or components. There are only policies and
@@ -672,22 +833,27 @@ its events as they are read from an upstream notification log.
 Single threaded
 ~~~~~~~~~~~~~~~
 
-If the ``system`` object is used as a context manager, the process
+If the ``system`` object is used with the library class
+:class:`~eventsourcing.application.system.SingleThreadedRunner`, the process
 applications will run in a single thread in the current process.
 Events will be processed with synchronous handling of prompts,
-so that policies effectively call each other recursively.
+so that policies effectively call each other recursively, according
+to which applications each is followed by.
 
-In the code below, the ``system`` object is used as a context manager.
-When used in this way, by default the process applications will share an
-in-memory SQLite database.
+In the example below, the ``system`` object is used directly as a context
+manager. Using the ``system`` object in this manner implicitly constructs
+a :class:`~eventsourcing.application.system.SingleThreadedRunner`, but this
+only works because ``system`` was constructed above with an ``infrastructure_class``.
+The process applications in this example will share an in-memory SQLite database,
+which is the default.
 
 .. code:: python
 
-    system.setup_tables = True
-
+    # Run system with single thread.
     with system:
-        # Create new order command.
-        cmd_id = system.processes['commands'].create_new_order()
+
+        # Create "create order" command.
+        cmd_id = system.processes['commands'].create_order()
 
         # Check the command has an order ID and is done.
         cmd = system.processes['commands'].repository[cmd_id]
@@ -709,7 +875,7 @@ Basically, given the system is running, when a "create new order" command is
 created, then the command is done, and an order has been both reserved and paid.
 
 Everything happens synchronously, in a single thread, so that by the time
-``create_new_order()`` has returned, the system has already processed the
+``create_order()`` has returned, the system has already processed the
 command, which can be retrieved from the "commands" repository.
 
 Running the system with a single thread and an in-memory database is
@@ -724,8 +890,9 @@ Multiprocessing
 ~~~~~~~~~~~~~~~
 
 The example below shows the same system of process applications running in
-different operating system processes, using the library's ``MultiprocessRunner`` class,
-which uses Python's ``multiprocessing`` library.
+different operating system processes, using the library's
+:class:`~eventsourcing.application.system.MultiprocessRunner`
+class, which uses Python's ``multiprocessing`` library.
 
 Running the system with multiple operating system processes means the different processes
 are running concurrently, so that as the payment is made for one order, another order might
@@ -760,7 +927,7 @@ process applications were using different databases, upstream notification
 logs would need to be presented in an API, so that downstream could read
 notifications from a remote notification log, as discussed in the section
 about notifications (using separate databases is not currently supported
-by the ``MultiprocessRunner`` class).
+by the :class:`~eventsourcing.application.system.MultiprocessRunner` class).
 
 The MySQL database needs to be created before running the next bit of code.
 
@@ -768,18 +935,17 @@ The MySQL database needs to be created before running the next bit of code.
 
     $ mysql -e "CREATE DATABASE eventsourcing;"
 
-Before starting the system's operating system processes, let's create a ``CreateNewOrder``
-command using the ``create_new_order()`` method on the ``Commands`` process (defined above).
+Before starting the system's operating system processes, let's create a ``CreateOrder``
+command using the ``create_order()`` method on the ``Commands`` process (defined above).
 Because the system isn't yet running, the command remains unprocessed.
 
 
 .. code:: python
 
-
-    with Commands.mixin(SQLAlchemyApplication)(setup_table=True) as commands:
+    with Commands.bind(SQLAlchemyApplication, setup_table=True) as commands:
 
         # Create a new command.
-        cmd_id = commands.create_new_order()
+        cmd_id = commands.create_order()
 
         # Check command exists in repository.
         assert cmd_id in commands.repository
@@ -788,8 +954,8 @@ Because the system isn't yet running, the command remains unprocessed.
         assert not commands.repository[cmd_id].is_done
 
 The database tables for storing events and tracking notification were created by the code
-above, because the ``Commands`` process was constructed with ``setup_tables=True``, which
-is by default ``False`` in the application classes.
+above, because the ``Commands`` process was constructed with ``setup_table=True``, which
+is ``False`` by default.
 
 
 Single pipeline
@@ -807,7 +973,9 @@ Single pipeline
 .. a response is created (how?), the request actor could be sent
 .. a message, so clients get a blocking call that doesn't involve polling.
 
-The code below uses the library's ``MultiprocessRunner`` class to run the ``system``.
+The code below uses the library's
+:class:`~eventsourcing.application.multiprocess.MultiprocessRunner`
+class to run the ``system``.
 It starts one operating system process for each process application
 in the system, which in this example will give four child operating
 system processes.
@@ -816,9 +984,9 @@ system processes.
 
     from eventsourcing.application.multiprocess import MultiprocessRunner
 
-    multiprocessing_system = MultiprocessRunner(system, setup_tables=True)
+    runner = MultiprocessRunner(system)
 
-The operating system processes can be started by using the ``multiprocess``
+The operating system processes can be started by using the ``runner``
 object as a context manager. The unprocessed commands will be processed
 shortly after the various operating system processes have been started.
 
@@ -830,7 +998,7 @@ shortly after the various operating system processes have been started.
         assert repository[cmd_id].is_done
 
     # Process the command.
-    with multiprocessing_system, Commands.mixin(SQLAlchemyApplication)() as commands:
+    with runner, Commands.bind(SQLAlchemyApplication) as commands:
         assert_command_is_done(commands.repository, cmd_id)
 
 The process applications read their upstream notification logs when they start,
@@ -853,7 +1021,7 @@ so the unprocessed command is picked up and processed immediately.
 .. application, rather than e.g. a command process application that is followed
 .. by the orders process, there will be contention and conflicts writing to the
 .. orders process notification log. The example was designed to cause this contention,
-.. and the ``@retry`` decorator was applied to the ``create_new_order()`` factory, so
+.. and the ``@retry`` decorator was applied to the ``create_order()`` factory, so
 .. when conflicts are encountered, the operation will be retried and will most probably
 .. eventually succeed. For the same reason, the same ``@retry``  decorator is applied
 .. the ``run()`` method of the library class ``Process``. Contention is managed successfully
@@ -887,20 +1055,22 @@ Pipelines have integer IDs. In this example, the pipeline IDs are ``[0, 1, 2]``.
 It would be possible to run the system with e.g. pipelines 0-7 on one machine, pipelines 8-15
 on another machine, and so on.
 
-The ``pipeline_ids`` are given to the ``MultiprocessRunner`` object.
+The ``pipeline_ids`` are given to the
+:class:`~eventsourcing.application.multiprocess.MultiprocessRunner`
+class when the ``runner`` is constructed.
 
 .. code:: python
 
-    multiprocessing_system = MultiprocessRunner(system, pipeline_ids=pipeline_ids)
+    runner = MultiprocessRunner(system, pipeline_ids=pipeline_ids)
 
 With the multiprocessing system running each of the process applications
-as a separate operating system process, and the commands process running
-in the current process, commands are created in each pipeline of the commands
-process, which causes orders to be processed by the system.
+as a separate operating system process, and the commands process application
+constructed in the current process, commands are created in each pipeline of
+the commands process, which causes orders to be processed by the system.
 
 .. code:: python
 
-    with multiprocessing_system, Commands.mixin(SQLAlchemyApplication)() as commands:
+    with runner, Commands.bind(SQLAlchemyApplication) as commands:
 
         # Create new orders.
         command_ids = []
@@ -911,7 +1081,7 @@ process, which causes orders to be processed by the system.
                 commands.change_pipeline(pipeline_id)
 
                 # Create a "create new order" command.
-                cmd_id = commands.create_new_order()
+                cmd_id = commands.create_order()
                 command_ids.append(cmd_id)
 
         # Check all commands are eventually done.
@@ -991,9 +1161,10 @@ The actors will run by sending messages recursively.
 
     from eventsourcing.application.actors import ActorsRunner
 
-    actors = ActorsRunner(system, pipeline_ids=pipeline_ids)
+    runner = ActorsRunner(system, pipeline_ids=pipeline_ids)
 
-    with actors, Commands.mixin(SQLAlchemyApplication)() as commands:
+
+    with runner, Commands.bind(SQLAlchemyApplication) as commands:
 
         # Create new orders.
         command_ids = []
@@ -1004,7 +1175,7 @@ The actors will run by sending messages recursively.
                 commands.change_pipeline(pipeline_id)
 
                 # Create a "create new order" command.
-                cmd_id = commands.create_new_order()
+                cmd_id = commands.create_order()
                 command_ids.append(cmd_id)
 
         # Check all commands are eventually done.
@@ -1221,3 +1392,25 @@ library doesn't currently have any such adapter process classes or documentation
 .. committing successfully. This hasn't been implemented in the library.
 
 .. Todo: Something about deleting old tracking records automatically.
+
+Process event pattern
+=====================
+
+`draft`
+
+A set of EVENT SOURCED APPLICATIONS can be composed into a system of applications. Application state can be propagated to other applications. Application state is defined by domain event records that have been committed. Each application has a policy which defines how it responds to the domain events it processes.
+
+Infrastructure may fail at any time. Although committed database transactions are expected to be durable, the operating system processes, the network, and the databases may go down at any time. Depending on the system design, application state may be adversely affected by infrastructure failures.
+
+Therefore…
+
+Use counting to sequence the domain events of an application. Use a unique constraint to make sure only one domain event is recorded for each position. Ensure there are no gaps by calculating the next position from the last recorded position. Also use counting to follow the domain events of an upstream application. Use a tracking record to store the current position in the upstream sequence. Use a unique constraint to make sure tracking can be recorded for each upstream domain event only once.
+
+Use atomic database transactions to record process event atomically. Include the tracking position,
+the new domain events created by application policy, and their position in the application’s sequence.
+Use an object class (or other data type) called "ProcessEvent" to keep these data together, so that
+they can be passed into functions as a single argument.
+
+Then, the distributed system can be considered reliable in the sense that the facts in the database will represent either that a process event occurred or that it didn’t occur, and so application state will by entirely unaffected by infrastructure failures.
+
+Event sourced applications may be implemented with EVENT SOURCED AGGREGATES.  To scale the system, use CAUSAL DEPENDENCIES to synchronise parallel pipelines. Use SYSTEM RUNNERS to bind system to infrastructure it needs to run.
